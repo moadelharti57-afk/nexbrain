@@ -1,0 +1,408 @@
+// NexBrain — modèle de données (cahier des charges, diapositive 25)
+// Règle : relations indexées, contrôle d'accès par propriétaire (userId),
+// JSON uniquement pour les attributs réellement flexibles.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ───────────────────────── Comptes ─────────────────────────
+
+enum Role {
+  USER
+  ADMIN
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String?
+  passwordHash String
+  role         Role     @default(USER)
+  /// Préférences UI + pondérations de scoring par défaut
+  preferences  Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions    Session[]
+  brainstorms Brainstorm[]
+  comparisons Comparison[]
+  usage       UsageRecord[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  /// SHA-256 du jeton envoyé dans le cookie (le jeton brut n'est jamais stocké)
+  tokenHash String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// ───────────────────────── Brainstorming ─────────────────────────
+
+enum BrainstormStatus {
+  DRAFT
+  RUNNING
+  COMPLETED
+  FAILED
+  ARCHIVED
+}
+
+enum BrainstormMode {
+  QUICK // Découverte rapide
+  ADVANCED // Analyse avancée
+}
+
+enum MarketType {
+  B2B
+  B2C
+  B2G
+}
+
+enum Zone {
+  LOCAL
+  REGIONAL
+  NATIONAL
+}
+
+model Brainstorm {
+  id     String           @id @default(cuid())
+  userId String
+  title  String
+  mode   BrainstormMode   @default(QUICK)
+  status BrainstormStatus @default(DRAFT)
+
+  // Contexte
+  city         String?
+  country      String? @default("Maroc")
+  sector       String?
+  subSector    String?
+  knownProblem String?
+  description  String?
+
+  // Ressources
+  budgetMaxMad Int?
+  deadlineDays Int?
+  teamSize     Int?
+  availability String?
+  skills       String[]
+
+  // Marché
+  targetAudience String?
+  marketType     MarketType?
+  zone           Zone?
+
+  /// Champs avancés : types de projet, monétisation, contraintes, priorités…
+  extra   Json?
+  /// Pondérations de scoring (faisabilité, coût, délai, demande, potentiel)
+  weights Json?
+
+  /// Version courante (incrémentée à chaque relance / modification des critères)
+  version   Int      @default(1)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problems Problem[]
+  runs     Run[]
+  versions BrainstormVersion[]
+  reports  Report[]
+
+  @@index([userId, updatedAt])
+  @@index([userId, status])
+}
+
+/// Instantané figé d'une analyse : contexte + résultats + critères + date.
+model BrainstormVersion {
+  id           String   @id @default(cuid())
+  brainstormId String
+  version      Int
+  snapshot     Json
+  createdAt    DateTime @default(now())
+
+  brainstorm Brainstorm @relation(fields: [brainstormId], references: [id], onDelete: Cascade)
+
+  @@unique([brainstormId, version])
+}
+
+// ───────────────────────── Problèmes & idées ─────────────────────────
+
+enum EvidenceKind {
+  FACT // Fait sourcé
+  ESTIMATE // Estimation
+  HYPOTHESIS // Hypothèse
+  CONSTRAINT // Contrainte
+}
+
+model Problem {
+  id            String   @id @default(cuid())
+  brainstormId  String
+  title         String
+  description   String
+  affectedUsers String?
+  consequences  String?
+  /// Fréquence supposée (1–5), toujours une hypothèse tant que non sourcée
+  frequency     Int?
+  selected      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+
+  brainstorm Brainstorm @relation(fields: [brainstormId], references: [id], onDelete: Cascade)
+  ideas      Idea[]
+  evidence   Evidence[]
+
+  @@index([brainstormId])
+}
+
+enum IdeaStatus {
+  PROPOSED
+  ANALYZED
+  WITHIN_CONSTRAINTS
+  TO_VERIFY
+  REJECTED
+  CHOSEN
+}
+
+model Idea {
+  id            String     @id @default(cuid())
+  problemId     String
+  name          String
+  pitch         String
+  /// Rôle réel de l'IA dans la solution (garde-fou « pas juste un chatbot »)
+  aiValue       String?
+  businessModel String?
+  /// Fonctionnalités MVP : string[]
+  mvpFeatures   Json?
+  status        IdeaStatus @default(PROPOSED)
+  favorite      Boolean    @default(false)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  problem        Problem         @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  marketAnalysis MarketAnalysis?
+  techEstimate   TechEstimate?
+  score          Score?
+  evidence       Evidence[]
+  tasks          Task[]
+
+  @@index([problemId])
+}
+
+/// Élément traçable : fait, estimation, hypothèse ou contrainte (diapositive 12).
+model Evidence {
+  id          String       @id @default(cuid())
+  kind        EvidenceKind
+  statement   String
+  sourceUrl   String?
+  sourceTitle String?
+  excerpt     String?
+  /// Date de publication / consultation de la source
+  sourceDate  DateTime?
+  /// Validation terrain à mener (pour les hypothèses)
+  validation  String?
+  problemId   String?
+  ideaId      String?
+  createdAt   DateTime     @default(now())
+
+  problem Problem? @relation(fields: [problemId], references: [id], onDelete: Cascade)
+  idea    Idea?    @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@index([problemId])
+  @@index([ideaId])
+}
+
+// ───────────────────────── Analyses ─────────────────────────
+
+model MarketAnalysis {
+  id              String   @id @default(cuid())
+  ideaId          String   @unique
+  /// [{ name, kind: "direct"|"alternative", url?, price? }]
+  competitors     Json
+  adoptionRisks   String[]
+  fieldQuestions  String[]
+  /// Note 0–100 de la demande (estimée à partir des éléments sourcés)
+  demandScore     Int?
+  /// Note 0–100 du potentiel commercial (estimation)
+  commercialScore Int?
+  /// false quand aucun outil de recherche n'était disponible
+  verified        Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+}
+
+model TechEstimate {
+  id              String   @id @default(cuid())
+  ideaId          String   @unique
+  architecture    String?
+  /// Calculés en TypeScript à partir des tâches (jamais par le LLM)
+  costMinMad      Int
+  costCentralMad  Int
+  costMaxMad      Int
+  /// Postes de coût détaillés : [{ label, unit, qty, unitPriceMad, priceDate? }]
+  costLines       Json
+  durationMinDays Int
+  durationMaxDays Int
+  feasibility     Int
+  blockers        String[]
+  securityNotes   String[]
+  createdAt       DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+}
+
+model Task {
+  id        String   @id @default(cuid())
+  ideaId    String
+  title     String
+  phase     String?
+  hoursMin  Float
+  hoursMax  Float
+  /// Ids (ou titres) des tâches dont celle-ci dépend
+  dependsOn String[]
+  order     Int      @default(0)
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+
+  @@index([ideaId])
+}
+
+model Score {
+  id           String   @id @default(cuid())
+  ideaId       String   @unique
+  feasibility  Int
+  cost         Int
+  delay        Int
+  demand       Int
+  commercial   Int
+  total        Int
+  weights      Json
+  /// Contraintes bloquantes non respectées → exclue du classement
+  blocked      Boolean  @default(false)
+  blockReasons String[]
+  rank         Int?
+  rationale    String?
+  createdAt    DateTime @default(now())
+
+  idea Idea @relation(fields: [ideaId], references: [id], onDelete: Cascade)
+}
+
+// ───────────────────────── Exécutions IA ─────────────────────────
+
+enum RunStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum AgentName {
+  EXPLORER
+  INNOVATOR
+  ANALYST
+  TECHNICAL
+  DECIDER
+}
+
+/// Une exécution du workflow (les 5 agents) pour un brainstorm.
+model Run {
+  id           String     @id @default(cuid())
+  brainstormId String
+  status       RunStatus  @default(QUEUED)
+  /// Agent courant / dernier agent exécuté
+  currentAgent AgentName?
+  /// Relancer à partir d'un agent donné (reprise)
+  startFrom    AgentName?
+  jobId        String?
+  error        String?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  createdAt    DateTime   @default(now())
+
+  brainstorm Brainstorm       @relation(fields: [brainstormId], references: [id], onDelete: Cascade)
+  executions AgentExecution[]
+
+  @@index([brainstormId, createdAt])
+}
+
+model AgentExecution {
+  id           String    @id @default(cuid())
+  runId        String
+  agent        AgentName
+  /// Idée traitée (Analyste / Technique travaillent idée par idée)
+  ideaId       String?
+  status       RunStatus @default(QUEUED)
+  attempt      Int       @default(1)
+  model        String?
+  inputTokens  Int       @default(0)
+  outputTokens Int       @default(0)
+  /// Sortie brute validée (Zod) de l'agent
+  output       Json?
+  logs         String[]
+  error        String?
+  startedAt    DateTime?
+  finishedAt   DateTime?
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+}
+
+// ───────────────────────── Comparaisons, rapports, usage ─────────────────────────
+
+model Comparison {
+  id        String   @id @default(cuid())
+  userId    String
+  ideaIds   String[]
+  weights   Json
+  result    Json
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+enum ReportFormat {
+  PDF
+  JSON
+  MARKDOWN
+}
+
+model Report {
+  id           String       @id @default(cuid())
+  brainstormId String
+  version      Int
+  format       ReportFormat
+  /// Chemin ou URL du fichier exporté
+  location     String?
+  createdAt    DateTime     @default(now())
+
+  brainstorm Brainstorm @relation(fields: [brainstormId], references: [id], onDelete: Cascade)
+
+  @@index([brainstormId])
+}
+
+model UsageRecord {
+  id           String     @id @default(cuid())
+  userId       String
+  agent        AgentName?
+  model        String?
+  inputTokens  Int        @default(0)
+  outputTokens Int        @default(0)
+  createdAt    DateTime   @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}

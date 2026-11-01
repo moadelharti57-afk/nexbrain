@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: nexbrain
+          POSTGRES_PASSWORD: nexbrain
+          POSTGRES_DB: nexbrain
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U nexbrain" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://nexbrain:nexbrain@localhost:5432/nexbrain?schema=public
+      REDIS_URL: redis://localhost:6379
+      # Chemin IA réel, contre le faux serveur Gemini (aucune clé ni coût)
+      AI_MOCK: "false"
+      GEMINI_API_KEY: fake
+      GEMINI_BASE_URL: http://localhost:8787
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run lint
+      - run: npm run typecheck
+      - name: Tests unitaires
+        run: npm test
+      - run: npm run build
+      - name: Tests d'intégration de l'API
+        run: |
+          node scripts/fake-gemini.mjs &
+          npm run worker &
+          npm start -- -p 3000 &
+          npx --yes wait-on@8 http://localhost:3000/login http://localhost:8787/__stats
+          NEXBRAIN_TEST_URL=http://localhost:3000 npm test

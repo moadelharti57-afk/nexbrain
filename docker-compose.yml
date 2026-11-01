@@ -1,0 +1,71 @@
+# NexBrain — web + worker + PostgreSQL + Redis
+# Démarrage : cp .env.example .env && docker compose up --build
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://nexbrain:nexbrain@db:5432/nexbrain?schema=public
+  REDIS_URL: redis://redis:6379
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMMA_MODEL: ${GEMMA_MODEL:-gemma-4-26b-a4b-it}
+  AI_MOCK: ${AI_MOCK:-false}
+  AI_MONTHLY_TOKEN_QUOTA: ${AI_MONTHLY_TOKEN_QUOTA:-2000000}
+  AI_RUN_TOKEN_LIMIT: ${AI_RUN_TOKEN_LIMIT:-400000}
+  AI_CACHE_TTL_SECONDS: ${AI_CACHE_TTL_SECONDS:-604800}
+  SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: nexbrain
+      POSTGRES_PASSWORD: nexbrain
+      POSTGRES_DB: nexbrain
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nexbrain"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  migrate:
+    build: { context: ., target: worker }
+    environment: *app-env
+    command: ["npx", "prisma", "migrate", "deploy"]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+
+  worker:
+    build: { context: ., target: worker }
+    environment: *app-env
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+  web:
+    build: { context: ., target: web }
+    environment: *app-env
+    ports:
+      - "3000:3000"
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
